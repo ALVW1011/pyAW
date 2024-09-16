@@ -1,0 +1,6 @@
+title: Crop View to Room
+tooltip: Crop the active view to the boundaries of a selected room.
+author: Your Name
+description: >
+  This tool allows you to select a point within a room, even in linked models, and crops the active view to the room's boundaries.
+required_revit_version: 2020

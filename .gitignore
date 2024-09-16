@@ -1,0 +1,18 @@
+# Ignore Python bytecode and caches
+*.pyc
+__pycache__/
+
+# Ignore pyRevit-specific temporary files
+*.rfa.tmp
+*.rvt.tmp
+*.bak
+
+# Log files
+*.log
+
+# Backup files
+*.bak
+
+# Operating system-specific files
+.DS_Store  # macOS
+Thumbs.db  # Windows
