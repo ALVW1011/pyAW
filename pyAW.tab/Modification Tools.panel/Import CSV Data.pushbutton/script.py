@@ -9,7 +9,6 @@ doc = uidoc.Document
 
 # Step 1: Let the user select a CSV file
 file_path = forms.pick_file(file_ext='csv', title="Select a CSV Clash Report File")
-#Testing git updates
 
 if not file_path:
     forms.alert("No file selected. Exiting script.", exitscript=True)
