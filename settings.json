@@ -1,0 +1,7 @@
+{
+  "python.autoComplete.extraPaths": [
+    "C:/Program Files/pyRevit-Master/pyrevitlib",
+    "C:/Program Files/ironpython-stubs-master/ironpython-stubs-master/release/stubs.min"
+  ],
+  "python.analysis.extraPaths": ["C:/Program Files/pyRevit-Master/pyrevitlib"]
+}

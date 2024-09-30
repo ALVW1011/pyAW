@@ -1,6 +1,9 @@
+import Autodesk.Revit
 from pyrevit import forms, script, revit, DB
 import os
 import csv
+
+
 
 # Initialize the output log for showing results
 output = script.get_output()
@@ -206,12 +209,27 @@ selected_intersecting_params = forms.SelectFromList.show(
 if not selected_intersecting_params:
     forms.alert("No parameters selected from intersecting elements. Exiting script.", exitscript=True)
 
+# Step 11a: Ask the user if they want to include parameter names as prefixes
+include_param_names_options = ['Yes', 'No']
+include_param_names_choice = forms.CommandSwitchWindow.show(
+    include_param_names_options,
+    message="Include parameter names as prefixes in the output?",
+    title="Parameter Name Prefix"
+)
+
+if include_param_names_choice == 'Yes':
+    include_param_names = True
+else:
+    include_param_names = False
+
 # Step 12: Collect data from intersecting elements and update primary elements
 with revit.Transaction("Update Primary Elements with Intersecting Element Data"):
     for primary_element in primary_elements:
         primary_element_id_str = str(primary_element.Id.IntegerValue)
         intersecting_element_ids = grouped_data[primary_element_id_str]
-        combined_data = []  # To accumulate data from intersecting elements
+        # Initialize a dictionary to store parameter values and counts
+        param_values_counts = {param_name: {} for param_name in selected_intersecting_params}
+
         for intersecting_element_id_str in intersecting_element_ids:
             intersecting_element = None
             # Try to get the intersecting element from the selected intersecting document
@@ -225,36 +243,64 @@ with revit.Transaction("Update Primary Elements with Intersecting Element Data")
                 # If still None, skip this intersecting element
                 continue
 
-            data_parts = []
             # Retrieve the selected parameters from the intersecting element
             for param_name in selected_intersecting_params:
                 # Try instance parameter
                 param = intersecting_element.LookupParameter(param_name)
+                param_value = None
                 if param and param.HasValue:
                     param_value = param.AsString() or param.AsValueString() or ""
-                    data_parts.append("{0}: {1}".format(param_name, param_value))
-                    continue  # Move to next parameter if found on instance
-
-                # If not found on instance, check type parameters for FamilyInstances
-                if isinstance(intersecting_element, DB.FamilyInstance):
-                    family_symbol = intersecting_element.Symbol
-                    param = family_symbol.LookupParameter(param_name)
-                    if param and param.HasValue:
-                        param_value = param.AsString() or param.AsValueString() or ""
-                        data_parts.append("{0}: {1}".format(param_name, param_value))
-                    else:
-                        data_parts.append("{0}: N/A".format(param_name))
                 else:
-                    data_parts.append("{0}: N/A".format(param_name))
+                    # If not found on instance, check type parameters for FamilyInstances
+                    if isinstance(intersecting_element, DB.FamilyInstance):
+                        family_symbol = intersecting_element.Symbol
+                        param = family_symbol.LookupParameter(param_name)
+                        if param and param.HasValue:
+                            param_value = param.AsString() or param.AsValueString() or ""
 
-            # Combine the data parts into a single string for this intersecting element
-            intersecting_data = "; ".join(data_parts)
-            combined_data.append(intersecting_data)
+                if param_value is not None:
+                    # Aggregate the values and counts
+                    if param_value in param_values_counts[param_name]:
+                        param_values_counts[param_name][param_value] += 1
+                    else:
+                        param_values_counts[param_name][param_value] = 1
+                else:
+                    # Handle cases where the parameter value is not found
+                    if "N/A" in param_values_counts[param_name]:
+                        param_values_counts[param_name]["N/A"] += 1
+                    else:
+                        param_values_counts[param_name]["N/A"] = 1
 
-        # After processing all intersecting elements, set the combined data to the primary element's parameter
+        # Prepare the final data to set in the primary element's parameter
+        combined_data_parts = []
+        for param_name in selected_intersecting_params:
+            values_counts = param_values_counts[param_name]
+            # Format the values with counts
+            formatted_values = []
+            for value, count in values_counts.items():
+                if count > 1:
+                    formatted_value = "{} ({})".format(value, count)
+                else:
+                    formatted_value = value
+                formatted_values.append(formatted_value)
+
+            # Remove duplicates
+            unique_formatted_values = list(set(formatted_values))
+
+            # Combine values into a single string
+            if include_param_names:
+                data_part = "{0}: {1}".format(param_name, ", ".join(unique_formatted_values))
+            else:
+                data_part = ", ".join(unique_formatted_values)
+
+            combined_data_parts.append(data_part)
+
+        # Combine all data parts into the final value
+        final_value = "\n".join(combined_data_parts)
+
+        # Set the final value to the primary element's parameter
         primary_param = primary_element.LookupParameter(selected_primary_param)
         if primary_param and not primary_param.IsReadOnly:
-            final_value = "\n".join(combined_data)  # Separate each intersecting element's data by a newline
             try:
                 primary_param.Set(final_value)
             except Exception as e:
