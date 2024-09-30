@@ -1,0 +1,6 @@
+title: Parameter Value Copier
+tooltip: Assigns values of one paramter onto another paramter
+author: Antonio Wong
+description: >
+  After selecting the category, family, and type, you can choose which instances to update. The tool will automatically assign the closest level below each selected instance as its schedule level.
+required_revit_version: 2020
