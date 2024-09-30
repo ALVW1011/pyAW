@@ -25,27 +25,28 @@ def get_families(doc, category_name):
     # Sort families alphabetically
     return sorted(list(families))
 
-# Helper function to get all family types in the selected family across the project (returns only unique types)
-def get_family_types(doc, category_name, family_name):
+# Helper function to get all family types in the selected families across the project
+def get_family_types(doc, category_name, family_names):
     family_types = set()  # Using a set to store unique family types
     collector = FilteredElementCollector(doc).OfClass(FamilyInstance).WhereElementIsNotElementType()
     
     for fam_instance in collector:
-        if fam_instance.Category.Name == category_name and fam_instance.Symbol.Family.Name == family_name:
+        if (fam_instance.Category.Name == category_name 
+            and fam_instance.Symbol.Family.Name in family_names):
             family_types.add(fam_instance.Name)  # Add only the family type (ignoring IDs here)
     
     # Sort family types alphabetically
     return sorted(list(family_types))
 
-# Helper function to collect all instances of a selected family type
-def get_family_instances(doc, category_name, family_name, type_name):
+# Helper function to collect all instances of selected family types from selected families
+def get_family_instances(doc, category_name, family_names, type_names):
     instances = []
     collector = FilteredElementCollector(doc).OfClass(FamilyInstance).WhereElementIsNotElementType()
     
     for fam_instance in collector:
         if (fam_instance.Category.Name == category_name 
-            and fam_instance.Symbol.Family.Name == family_name 
-            and fam_instance.Name == type_name):
+            and fam_instance.Symbol.Family.Name in family_names
+            and fam_instance.Name in type_names):
             instances.append(fam_instance)
     
     return instances
@@ -60,8 +61,8 @@ def get_current_level(doc, instance):
             return level.Name
     return "None assigned"
 
-# Function to get nearest level below the instance
-def get_nearest_level(doc, instance):
+# Function to get nearest level below the instance, excluding levels to ignore
+def get_nearest_level(doc, instance, levels_to_ignore):
     if hasattr(instance.Location, 'Point'):
         instance_location = instance.Location.Point
         levels = FilteredElementCollector(doc).OfClass(Level)
@@ -71,6 +72,9 @@ def get_nearest_level(doc, instance):
         nearest_distance = float('inf')
         
         for level in levels:
+            level_name = level.Name
+            if level_name in levels_to_ignore:
+                continue  # Skip levels to ignore
             level_elevation = level.Elevation
             if instance_location.Z > level_elevation:
                 distance = instance_location.Z - level_elevation
@@ -84,7 +88,7 @@ def get_nearest_level(doc, instance):
         return None
 
 # Function to assign the nearest level to the selected instances
-def assign_nearest_levels(doc, selected_instances):
+def assign_nearest_levels(doc, selected_instances, levels_to_ignore):
     updated_instances = []
     
     with Transaction(doc, "Assign Nearest Level") as t:
@@ -99,7 +103,7 @@ def assign_nearest_levels(doc, selected_instances):
                 current_level_name = "None assigned" if current_level == DB.ElementId.InvalidElementId else doc.GetElement(current_level).Name
                 
                 # Find nearest level
-                nearest_level = get_nearest_level(doc, instance)
+                nearest_level = get_nearest_level(doc, instance, levels_to_ignore)
                 if nearest_level:
                     schedule_level_param.Set(nearest_level.Id)
                     updated_instances.append((instance, current_level_name, nearest_level.Name))
@@ -116,22 +120,30 @@ def select_elements(doc):
     if not selected_category:
         forms.alert("No category selected.", exitscript=True)
     
-    # Step 2: Select Family within the chosen category
+    # Step 2: Select Families within the chosen category (allowing multiple selections)
     families = get_families(doc, selected_category)
-    selected_family = forms.SelectFromList.show(families, title="Select Family in {0}".format(selected_category))
-    if not selected_family:
-        forms.alert("No family selected.", exitscript=True)
+    selected_families = forms.SelectFromList.show(
+        families,
+        title="Select Families in {0}".format(selected_category),
+        multiselect=True
+    )
+    if not selected_families:
+        forms.alert("No families selected.", exitscript=True)
     
-    # Step 3: Select Family Type within the chosen family (now unique)
-    family_types = get_family_types(doc, selected_category, selected_family)
-    selected_family_type = forms.SelectFromList.show(family_types, title="Select Family Type in {0}".format(selected_family))
-    if not selected_family_type:
-        forms.alert("No family type selected.", exitscript=True)
+    # Step 3: Select Family Types within the chosen families (allowing multiple selections)
+    family_types = get_family_types(doc, selected_category, selected_families)
+    selected_family_types = forms.SelectFromList.show(
+        family_types,
+        title="Select Family Types in Selected Families",
+        multiselect=True
+    )
+    if not selected_family_types:
+        forms.alert("No family types selected.", exitscript=True)
 
-    # Step 4: Select Instances within the chosen family type
-    instances = get_family_instances(doc, selected_category, selected_family, selected_family_type)
+    # Step 4: Select Instances within the chosen family types
+    instances = get_family_instances(doc, selected_category, selected_families, selected_family_types)
     if not instances:
-        forms.alert("No instances found for the selected family type.", exitscript=True)
+        forms.alert("No instances found for the selected family types.", exitscript=True)
 
     # Return the selected instances
     return instances
@@ -153,7 +165,11 @@ def main():
         element_checklist.append("{0} (Current Level: {1})".format(instance.Name, current_level))
     
     # Let the user select which instances to update
-    selected_instance_names = forms.SelectFromList.show(element_checklist, title="Select Instances to Update", multiselect=True)
+    selected_instance_names = forms.SelectFromList.show(
+        element_checklist,
+        title="Select Instances to Update",
+        multiselect=True
+    )
     
     if not selected_instance_names:
         forms.alert("No instances selected for updating.", exitscript=True)
@@ -164,10 +180,21 @@ def main():
         if "{0} (Current Level: {1})".format(instance.Name, get_current_level(doc, instance)) in selected_instance_names
     ]
     
-    # Step 3: Assign nearest levels to the selected instances
-    updated_instances = assign_nearest_levels(doc, selected_instances)
+    # Step 3: Let the user select levels to ignore
+    levels = FilteredElementCollector(doc).OfClass(Level)
+    level_names = [level.Name for level in levels]
+    levels_to_ignore = forms.SelectFromList.show(
+        level_names,
+        title="Select Levels to Ignore",
+        multiselect=True
+    )
+    if levels_to_ignore is None:
+        levels_to_ignore = []
     
-    # Step 4: Display the results
+    # Step 4: Assign nearest levels to the selected instances
+    updated_instances = assign_nearest_levels(doc, selected_instances, levels_to_ignore)
+    
+    # Step 5: Display the results
     if updated_instances:
         results = ["Instance Name | Current Level | New Level"]
         for instance, current_level, new_level in updated_instances:
