@@ -222,6 +222,59 @@ if include_param_names_choice == 'Yes':
 else:
     include_param_names = False
 
+# Step 11b: Aggregate all unique parameter values across all primary elements
+# Initialize a dictionary to store all unique values per parameter
+unique_param_values = {param_name: set() for param_name in selected_intersecting_params}
+
+# Collect unique parameter values
+for primary_element in primary_elements:
+    primary_element_id_str = str(primary_element.Id.IntegerValue)
+    intersecting_element_ids = grouped_data[primary_element_id_str]
+    for intersecting_element_id_str in intersecting_element_ids:
+        try:
+            element_id = DB.ElementId(int(intersecting_element_id_str))
+            intersecting_element = intersecting_doc.GetElement(element_id)
+        except Exception as e:
+            output.print_md("Error getting intersecting element ID {}: {}".format(intersecting_element_id_str, str(e)))
+            continue
+
+        if intersecting_element is None:
+            continue
+
+        for param_name in selected_intersecting_params:
+            param = intersecting_element.LookupParameter(param_name)
+            param_value = None
+            if param and param.HasValue:
+                param_value = param.AsString() or param.AsValueString() or ""
+            else:
+                # If not found on instance, check type parameters for FamilyInstances
+                if isinstance(intersecting_element, DB.FamilyInstance):
+                    family_symbol = intersecting_element.Symbol
+                    param = family_symbol.LookupParameter(param_name)
+                    if param and param.HasValue:
+                        param_value = param.AsString() or param.AsValueString() or ""
+            if param_value:
+                unique_param_values[param_name].add(param_value)
+            else:
+                unique_param_values[param_name].add("N/A")
+
+# Step 11c: Let the user select which unique values to include per parameter
+# We'll create a mapping from parameter names to selected values
+selected_values_per_param = {}
+for param_name, values in unique_param_values.items():
+    # Convert set to sorted list for user-friendly display
+    sorted_values = sorted(values)
+    selected_values = forms.SelectFromList.show(
+        sorted_values,
+        title="Select values to include for parameter '{}'".format(param_name),
+        multiselect=True
+    )
+    if selected_values:
+        selected_values_per_param[param_name] = set(selected_values)
+    else:
+        # If no selection made, assume all values are excluded
+        selected_values_per_param[param_name] = set()
+
 # Step 12: Collect data from intersecting elements and update primary elements
 with revit.Transaction("Update Primary Elements with Intersecting Element Data"):
     for primary_element in primary_elements:
@@ -258,18 +311,16 @@ with revit.Transaction("Update Primary Elements with Intersecting Element Data")
                         if param and param.HasValue:
                             param_value = param.AsString() or param.AsValueString() or ""
 
-                if param_value is not None:
+                # Only include the parameter value if it was selected by the user
+                if param_value in selected_values_per_param[param_name]:
                     # Aggregate the values and counts
                     if param_value in param_values_counts[param_name]:
                         param_values_counts[param_name][param_value] += 1
                     else:
                         param_values_counts[param_name][param_value] = 1
                 else:
-                    # Handle cases where the parameter value is not found
-                    if "N/A" in param_values_counts[param_name]:
-                        param_values_counts[param_name]["N/A"] += 1
-                    else:
-                        param_values_counts[param_name]["N/A"] = 1
+                    # If the value was not selected, skip it
+                    continue
 
         # Prepare the final data to set in the primary element's parameter
         combined_data_parts = []
