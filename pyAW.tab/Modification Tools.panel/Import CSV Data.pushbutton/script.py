@@ -1,14 +1,168 @@
-import Autodesk.Revit
 from pyrevit import forms, script, revit, DB
 import os
 import csv
-
-
 
 # Initialize the output log for showing results
 output = script.get_output()
 uidoc = __revit__.ActiveUIDocument
 doc = uidoc.Document
+
+# Helper Functions
+
+def format_parameter_info(param, is_type_param):
+    """
+    Formats the parameter name with flags indicating if it's read-only, built-in, shared, and type or instance.
+
+    Args:
+        param (Autodesk.Revit.DB.Parameter): The parameter to format.
+        is_type_param (bool): True if it's a type parameter, False if instance.
+
+    Returns:
+        str: Formatted parameter name with flags.
+    """
+    flags = []
+    if param.IsReadOnly:
+        flags.append("Read-Only")
+    # Check if the parameter is built-in
+    if param.Definition.BuiltInParameter != DB.BuiltInParameter.INVALID:
+        flags.append("Built-In")
+    else:
+        # Assume shared if not built-in; adjust as necessary
+        flags.append("Shared")
+    # Indicate if it's a Type or Instance parameter
+    if is_type_param:
+        flags.append("Type")
+    else:
+        flags.append("Instance")
+
+    # Join flags with commas
+    flags_str = ", ".join(flags)
+    return "{0} [{1}]".format(param.Definition.Name, flags_str)
+
+def get_relevant_parameters(element, include_read_only=False):
+    """
+    Retrieves relevant parameters from an element, including both instance and type parameters,
+    formatted with flags indicating their properties.
+
+    Args:
+        element (Autodesk.Revit.DB.Element): The element from which to retrieve parameters.
+        include_read_only (bool): Whether to include read-only parameters.
+
+    Returns:
+        list of tuples: Each tuple contains the formatted parameter name and the actual parameter name.
+    """
+    params = []
+
+    # Collect instance parameters
+    for param in element.Parameters:
+        if param.StorageType != DB.StorageType.None and (include_read_only or not param.IsReadOnly):
+            formatted_name = format_parameter_info(param, is_type_param=False)
+            params.append((formatted_name, param.Definition.Name))
+
+    # Collect type parameters for elements with a valid type
+    type_id = element.GetTypeId()
+    if type_id != DB.ElementId.InvalidElementId:
+        type_element = element.Document.GetElement(type_id)
+        if type_element:
+            for param in type_element.Parameters:
+                if param.StorageType != DB.StorageType.None and (include_read_only or not param.IsReadOnly):
+                    formatted_name = format_parameter_info(param, is_type_param=True)
+                    params.append((formatted_name, param.Definition.Name))
+
+    return params
+
+def are_parameter_types_compatible(source_param, target_param):
+    """
+    Determines if the source and target parameters have compatible types.
+
+    Args:
+        source_param (Autodesk.Revit.DB.Parameter): The parameter from the intersecting element.
+        target_param (Autodesk.Revit.DB.Parameter): The parameter in the primary element.
+
+    Returns:
+        bool: True if types are compatible, False otherwise.
+    """
+    # Define compatible StorageType pairs
+    compatible_pairs = {
+        DB.StorageType.String: [DB.StorageType.String],
+        DB.StorageType.Integer: [DB.StorageType.Integer],
+        DB.StorageType.Double: [DB.StorageType.Double],
+        DB.StorageType.ElementId: [DB.StorageType.ElementId]
+    }
+
+    source_type = source_param.StorageType
+    target_type = target_param.StorageType
+
+    return target_type in compatible_pairs.get(source_type, [])
+
+def convert_parameter_value(source_param, target_param, value):
+    """
+    Converts the parameter value from source type to target type based on user input.
+
+    Args:
+        source_param (Autodesk.Revit.DB.Parameter): The parameter from the intersecting element.
+        target_param (Autodesk.Revit.DB.Parameter): The parameter in the primary element.
+        value: The value to convert.
+
+    Returns:
+        tuple: (converted_value, success_flag)
+    """
+    source_type = source_param.StorageType
+    target_type = target_param.StorageType
+
+    if source_type == DB.StorageType.Double and target_type == DB.StorageType.String:
+        # Convert double to string
+        return (str(value), True)
+    elif source_type == DB.StorageType.String and target_type == DB.StorageType.Double:
+        # Attempt to convert string to double
+        try:
+            numeric_value = float(value)
+            return (numeric_value, True)
+        except ValueError:
+            return (None, False)
+    elif source_type == DB.StorageType.Integer and target_type == DB.StorageType.String:
+        # Convert integer to string
+        return (str(value), True)
+    elif source_type == DB.StorageType.String and target_type == DB.StorageType.Integer:
+        # Attempt to convert string to integer
+        try:
+            numeric_value = int(value)
+            return (numeric_value, True)
+        except ValueError:
+            return (None, False)
+    else:
+        # Unsupported conversion
+        return (None, False)
+
+def get_parameter_value(param, doc):
+    """
+    Retrieves the value of a parameter based on its StorageType.
+
+    Args:
+        param (Autodesk.Revit.DB.Parameter): The parameter from which to retrieve the value.
+        doc (Autodesk.Revit.DB.Document): The document containing the element.
+
+    Returns:
+        The parameter value, or None if it cannot be retrieved.
+    """
+    if param.StorageType == DB.StorageType.String:
+        return param.AsString()
+    elif param.StorageType == DB.StorageType.Integer:
+        return param.AsInteger()
+    elif param.StorageType == DB.StorageType.Double:
+        return param.AsDouble()
+    elif param.StorageType == DB.StorageType.ElementId:
+        element_id = param.AsElementId()
+        if element_id != DB.ElementId.InvalidElementId and element_id != DB.ElementId(-1):
+            element = doc.GetElement(element_id)
+            if element:
+                return element.Name  # Or another suitable property
+            else:
+                return "Unknown Element"
+        else:
+            return "None"
+    else:
+        return None
 
 # Step 1: Let the user select a CSV file
 file_path = forms.pick_file(file_ext='csv', title="Select a CSV Clash Report File")
@@ -26,7 +180,7 @@ try:
         reader = csv.reader(f, dialect)
         headers = next(reader)
 except Exception as e:
-    forms.alert("Error reading CSV file: {}".format(str(e)), exitscript=True)
+    forms.alert("Error reading CSV file: {0}".format(str(e)), exitscript=True)
 
 # Step 3: Let the user select headers for Primary and Intersecting Elements
 primary_header = forms.SelectFromList.show(headers, title="Select Primary Element ID Column")
@@ -44,7 +198,7 @@ document_names = []
 
 # Add the host document
 documents.append(doc)
-document_names.append("Host Document ({})".format(doc.Title))
+document_names.append("Host Document ({0})".format(doc.Title))
 
 # Collect linked documents
 link_instances = DB.FilteredElementCollector(doc).OfClass(DB.RevitLinkInstance)
@@ -54,12 +208,12 @@ for link_instance in link_instances:
         documents.append(link_doc)
         # Use the link instance name or link document title as display name
         link_name = link_instance.Name  # This includes the linked file name and instance name
-        document_names.append("Linked Document ({})".format(link_name))
+        document_names.append("Linked Document ({0})".format(link_name))
 
 # Verify that documents and document_names are aligned
 output.print_md("Available Documents:")
 for idx, doc_name in enumerate(document_names):
-    output.print_md("  {}: {}".format(idx, doc_name))
+    output.print_md("  {0}: {1}".format(idx, doc_name))
 
 # Ask the user to select the document for primary elements
 primary_doc_choice = forms.SelectFromList.show(document_names, title="Select Document for Primary Elements")
@@ -67,7 +221,7 @@ if not primary_doc_choice:
     forms.alert("No document selected for Primary Elements. Exiting script.", exitscript=True)
 primary_doc_index = document_names.index(primary_doc_choice)
 primary_doc = documents[primary_doc_index]
-output.print_md("Selected primary document: {}".format(primary_doc_choice))
+output.print_md("Selected primary document: {0}".format(primary_doc_choice))
 
 # Ask the user to select the document for intersecting elements
 intersecting_doc_choice = forms.SelectFromList.show(document_names, title="Select Document for Intersecting Elements")
@@ -75,7 +229,7 @@ if not intersecting_doc_choice:
     forms.alert("No document selected for Intersecting Elements. Exiting script.", exitscript=True)
 intersecting_doc_index = document_names.index(intersecting_doc_choice)
 intersecting_doc = documents[intersecting_doc_index]
-output.print_md("Selected intersecting document: {}".format(intersecting_doc_choice))
+output.print_md("Selected intersecting document: {0}".format(intersecting_doc_choice))
 
 # Step 4: Process the data from the CSV
 data = []
@@ -87,10 +241,10 @@ try:
             if row[primary_header] and row[intersecting_header]:
                 data.append((row[primary_header], row[intersecting_header]))
 except Exception as e:
-    forms.alert("Error processing CSV data: {}".format(str(e)), exitscript=True)
+    forms.alert("Error processing CSV data: {0}".format(str(e)), exitscript=True)
 
 # Output total number of rows processed
-output.print_md("Total rows processed from CSV: {}".format(len(data)))
+output.print_md("Total rows processed from CSV: {0}".format(len(data)))
 
 # Step 5: Group by primary elements and combine intersecting elements
 grouped_data = {}
@@ -109,12 +263,12 @@ for element_id_str in primary_element_ids:
         if element:
             primary_elements.append(element)
         else:
-            output.print_md("Element ID {} not found in the selected primary document.".format(element_id_str))
+            output.print_md("Element ID {0} not found in the selected primary document.".format(element_id_str))
     except Exception as e:
-        output.print_md("Error processing Element ID {}: {}".format(element_id_str, str(e)))
+        output.print_md("Error processing Element ID {0}: {1}".format(element_id_str, str(e)))
 
 # Output total number of primary elements found
-output.print_md("Total primary elements found: {}".format(len(primary_elements)))
+output.print_md("Total primary elements found: {0}".format(len(primary_elements)))
 
 # If no valid primary elements were detected, exit the script
 if not primary_elements:
@@ -133,81 +287,78 @@ output.print_md("Processing complete. Showing the intermediate output for primar
 try:
     output.print_table(processed_data, title="Primary Elements and Intersecting Elements", columns=["Primary Element ID", "Intersecting Element IDs"])
 except Exception as e:
-    output.print_md("Error displaying table: {}".format(str(e)))
+    output.print_md("Error displaying table: {0}".format(str(e)))
     forms.alert("Failed to display table. Exiting script.", exitscript=True)
 
-# Step 8: Pause for user confirmation before proceeding
-proceed_options = ['Yes', 'No']
-proceed_choice = forms.CommandSwitchWindow.show(proceed_options, message="Proceed with data collection?", title="Confirmation")
-
-if proceed_choice != 'Yes':
-    forms.alert("Script cancelled.", exitscript=True)
+# Step 8: Remove unnecessary proceed with data collection pop-up
+# Previously: proceed_choice = forms.CommandSwitchWindow.show(...)
+# Now, we skip this step to streamline the workflow
 
 # Step 9: Allow the user to select the parameter in primary elements to update
-def get_text_or_multiline_parameters(element):
-    params = []
-    for param in element.Parameters:
-        if param.StorageType == DB.StorageType.String and param.Definition.ParameterType in [
-            DB.ParameterType.Text, DB.ParameterType.MultilineText]:
-            if not param.IsReadOnly:
-                params.append(param.Definition.Name)
-    return params
-
-# Getting parameters from the first primary element (assuming the same for all)
-available_primary_params = get_text_or_multiline_parameters(primary_elements[0])
+available_primary_params = get_relevant_parameters(primary_elements[0], include_read_only=False)
 if not available_primary_params:
-    forms.alert("No writable text or multiline text parameters found in primary elements. Exiting script.", exitscript=True)
+    forms.alert("No writable parameters found in primary elements. Exiting script.", exitscript=True)
 
-selected_primary_param = forms.SelectFromList.show(
-    available_primary_params,
+# Extract formatted names for display
+formatted_primary_params = [param[0] for param in available_primary_params]
+
+# User selects from formatted names
+selected_formatted_param = forms.SelectFromList.show(
+    formatted_primary_params,
     title="Select parameter to update in Primary Elements"
 )
 
-if not selected_primary_param:
+if not selected_formatted_param:
     forms.alert("No parameter selected from primary elements. Exiting script.", exitscript=True)
 
+# Map back to the actual parameter name
+selected_primary_param = None
+for formatted_name, actual_name in available_primary_params:
+    if formatted_name == selected_formatted_param:
+        selected_primary_param = actual_name
+        break
+
+if not selected_primary_param:
+    forms.alert("Selected parameter could not be mapped. Exiting script.", exitscript=True)
+
 # Step 10: Collect parameters from the intersecting elements
-intersecting_param_names = set()
+intersecting_params = {}
 
-# For the first intersecting element (for simplicity), collect parameters
-first_primary_element_id = str(primary_elements[0].Id.IntegerValue)
-first_intersecting_element_id = list(grouped_data[first_primary_element_id])[0]
-intersecting_element = None
+# Iterate through intersecting elements to collect parameters using the unified function
+for primary_element in primary_elements:
+    primary_element_id_str = str(primary_element.Id.IntegerValue)
+    intersecting_element_ids = grouped_data[primary_element_id_str]
+    for intersecting_element_id_str in intersecting_element_ids:
+        try:
+            element_id = DB.ElementId(int(intersecting_element_id_str))
+            intersecting_element = intersecting_doc.GetElement(element_id)
+        except Exception as e:
+            output.print_md("Error getting intersecting element ID {0}: {1}".format(intersecting_element_id_str, str(e)))
+            continue
 
-# Try to get the intersecting element from the selected intersecting document
-try:
-    element_id = DB.ElementId(int(first_intersecting_element_id))
-    intersecting_element = intersecting_doc.GetElement(element_id)
-except Exception as e:
-    output.print_md("Error getting intersecting element ID {}: {}".format(first_intersecting_element_id, str(e)))
+        if intersecting_element is None:
+            continue
 
-if intersecting_element is None:
-    forms.alert("First intersecting element not found in the selected intersecting document. Exiting script.", exitscript=True)
+        # Retrieve relevant parameters using the updated function
+        relevant_params = get_relevant_parameters(intersecting_element, include_read_only=False)
+        for formatted_name, actual_name in relevant_params:
+            intersecting_params[formatted_name] = actual_name  # Store both formatted and actual names
 
-# Collect instance parameters
-for param in intersecting_element.Parameters:
-    if param.Definition.Name and param.HasValue:
-        intersecting_param_names.add(param.Definition.Name)
+# Convert the dictionary keys to a sorted list for display
+formatted_intersecting_params = sorted(intersecting_params.keys())
 
-# If the element is a FamilyInstance, collect type parameters
-if isinstance(intersecting_element, DB.FamilyInstance):
-    family_symbol = intersecting_element.Symbol
-    for param in family_symbol.Parameters:
-        if param.Definition.Name and param.HasValue:
-            intersecting_param_names.add(param.Definition.Name)
-
-# Convert the set to a sorted list
-intersecting_param_names = sorted(intersecting_param_names)
-
-# Step 11: Allow the user to select parameters from intersecting elements to retrieve
-selected_intersecting_params = forms.SelectFromList.show(
-    intersecting_param_names,
+# User selects from formatted names
+selected_formatted_intersecting_params = forms.SelectFromList.show(
+    formatted_intersecting_params,
     title="Select parameters to retrieve from Intersecting Elements (multiple selection allowed)",
     multiselect=True
 )
 
-if not selected_intersecting_params:
+if not selected_formatted_intersecting_params:
     forms.alert("No parameters selected from intersecting elements. Exiting script.", exitscript=True)
+
+# Map back to actual parameter names
+selected_intersecting_params = [intersecting_params[formatted_name] for formatted_name in selected_formatted_intersecting_params]
 
 # Step 11a: Ask the user if they want to include parameter names as prefixes
 include_param_names_options = ['Yes', 'No']
@@ -235,28 +386,56 @@ for primary_element in primary_elements:
             element_id = DB.ElementId(int(intersecting_element_id_str))
             intersecting_element = intersecting_doc.GetElement(element_id)
         except Exception as e:
-            output.print_md("Error getting intersecting element ID {}: {}".format(intersecting_element_id_str, str(e)))
+            output.print_md("Error getting intersecting element ID {0}: {1}".format(intersecting_element_id_str, str(e)))
             continue
 
         if intersecting_element is None:
             continue
 
         for param_name in selected_intersecting_params:
-            param = intersecting_element.LookupParameter(param_name)
-            param_value = None
-            if param and param.HasValue:
-                param_value = param.AsString() or param.AsValueString() or ""
+            source_value = None  # Initialize source_value
+
+            # Check if the selected parameter is "Type Mark"
+            if param_name == "Type Mark":
+                # Get the built-in parameter for Type Mark
+                TYPE_MARK_PARAM = DB.BuiltInParameter.ALL_MODEL_TYPE_MARK
+
+                # Get the type element
+                type_id = intersecting_element.GetTypeId()
+                if type_id != DB.ElementId.InvalidElementId:
+                    type_element = intersecting_element.Document.GetElement(type_id)
+                    if type_element:
+                        source_param = type_element.get_Parameter(TYPE_MARK_PARAM)
+                        if source_param and source_param.HasValue:
+                            source_value = get_parameter_value(source_param, intersecting_doc)
             else:
-                # If not found on instance, check type parameters for FamilyInstances
-                if isinstance(intersecting_element, DB.FamilyInstance):
-                    family_symbol = intersecting_element.Symbol
-                    param = family_symbol.LookupParameter(param_name)
-                    if param and param.HasValue:
-                        param_value = param.AsString() or param.AsValueString() or ""
-            if param_value:
-                unique_param_values[param_name].add(param_value)
+                # Attempt to get the parameter from the instance
+                source_param = intersecting_element.LookupParameter(param_name)
+
+                # If not found or has no value, try to get it from the type element
+                if source_param is None or not source_param.HasValue:
+                    type_id = intersecting_element.GetTypeId()
+                    if type_id != DB.ElementId.InvalidElementId:
+                        type_element = intersecting_element.Document.GetElement(type_id)
+                        if type_element:
+                            source_param = type_element.LookupParameter(param_name)
+                            if source_param and source_param.HasValue:
+                                source_value = get_parameter_value(source_param, intersecting_doc)
+                else:
+                    # Retrieve the parameter value from the instance
+                    source_value = get_parameter_value(source_param, intersecting_doc)
+
+            # If source_value is None, assign "N/A"
+            if source_value is None:
+                source_value_str = "N/A"
             else:
-                unique_param_values[param_name].add("N/A")
+                # Convert source_value to string for comparison
+                if isinstance(source_value, float):
+                    source_value_str = "{0:.2f}".format(source_value)
+                else:
+                    source_value_str = str(source_value)
+
+            unique_param_values[param_name].add(source_value_str)
 
 # Step 11c: Let the user select which unique values to include per parameter
 # We'll create a mapping from parameter names to selected values
@@ -266,7 +445,7 @@ for param_name, values in unique_param_values.items():
     sorted_values = sorted(values)
     selected_values = forms.SelectFromList.show(
         sorted_values,
-        title="Select values to include for parameter '{}'".format(param_name),
+        title="Select values to include for parameter '{0}'".format(param_name),
         multiselect=True
     )
     if selected_values:
@@ -284,53 +463,116 @@ with revit.Transaction("Update Primary Elements with Intersecting Element Data")
         param_values_counts = {param_name: {} for param_name in selected_intersecting_params}
 
         for intersecting_element_id_str in intersecting_element_ids:
-            intersecting_element = None
-            # Try to get the intersecting element from the selected intersecting document
             try:
                 element_id = DB.ElementId(int(intersecting_element_id_str))
                 intersecting_element = intersecting_doc.GetElement(element_id)
             except Exception as e:
-                output.print_md("Error getting intersecting element ID {}: {}".format(intersecting_element_id_str, str(e)))
+                output.print_md("Error getting intersecting element ID {0}: {1}".format(intersecting_element_id_str, str(e)))
+                continue  # Skip if unable to get the element
 
             if intersecting_element is None:
-                # If still None, skip this intersecting element
-                continue
+                continue  # Skip if the element is not found
 
             # Retrieve the selected parameters from the intersecting element
             for param_name in selected_intersecting_params:
-                # Try instance parameter
-                param = intersecting_element.LookupParameter(param_name)
-                param_value = None
-                if param and param.HasValue:
-                    param_value = param.AsString() or param.AsValueString() or ""
-                else:
-                    # If not found on instance, check type parameters for FamilyInstances
-                    if isinstance(intersecting_element, DB.FamilyInstance):
-                        family_symbol = intersecting_element.Symbol
-                        param = family_symbol.LookupParameter(param_name)
-                        if param and param.HasValue:
-                            param_value = param.AsString() or param.AsValueString() or ""
+                source_value = None  # Initialize source_value
 
-                # Only include the parameter value if it was selected by the user
-                if param_value in selected_values_per_param[param_name]:
-                    # Aggregate the values and counts
-                    if param_value in param_values_counts[param_name]:
-                        param_values_counts[param_name][param_value] += 1
-                    else:
-                        param_values_counts[param_name][param_value] = 1
+                # Check if the selected parameter is "Type Mark"
+                if param_name == "Type Mark":
+                    # Get the built-in parameter for Type Mark
+                    TYPE_MARK_PARAM = DB.BuiltInParameter.ALL_MODEL_TYPE_MARK
+
+                    # Get the type element
+                    type_id = intersecting_element.GetTypeId()
+                    if type_id != DB.ElementId.InvalidElementId:
+                        type_element = intersecting_element.Document.GetElement(type_id)
+                        if type_element:
+                            source_param = type_element.get_Parameter(TYPE_MARK_PARAM)
+                            if source_param and source_param.HasValue:
+                                source_value = get_parameter_value(source_param, intersecting_doc)
                 else:
-                    # If the value was not selected, skip it
+                    # Attempt to get the parameter from the instance
+                    source_param = intersecting_element.LookupParameter(param_name)
+
+                    # If not found or has no value, try to get it from the type element
+                    if source_param is None or not source_param.HasValue:
+                        type_id = intersecting_element.GetTypeId()
+                        if type_id != DB.ElementId.InvalidElementId:
+                            type_element = intersecting_element.Document.GetElement(type_id)
+                            if type_element:
+                                source_param = type_element.LookupParameter(param_name)
+                                if source_param and source_param.HasValue:
+                                    source_value = get_parameter_value(source_param, intersecting_doc)
+                    else:
+                        # Retrieve the parameter value from the instance
+                        source_value = get_parameter_value(source_param, intersecting_doc)
+
+                # If source_value is None, assign "N/A"
+                if source_value is None:
+                    source_value_str = "N/A"
+                else:
+                    # Convert source_value to string for comparison
+                    if isinstance(source_value, float):
+                        source_value_str = "{0:.2f}".format(source_value)
+                    else:
+                        source_value_str = str(source_value)
+
+                # If the source value is not selected by the user, skip
+                if source_value_str not in selected_values_per_param.get(param_name, set()):
                     continue
+
+                # Lookup target parameter in the primary element
+                target_param = primary_element.LookupParameter(selected_primary_param)
+                if target_param is None:
+                    output.print_md("Parameter '{0}' not found on primary element ID {1}.".format(selected_primary_param, primary_element.Id.IntegerValue))
+                    continue
+
+                # Check type compatibility
+                if not are_parameter_types_compatible(source_param, target_param):
+                    # Notify user about type mismatch and ask for action
+                    message = "Parameter '{0}' has incompatible types.\nSource Type: {1}\nTarget Type: {2}\nChoose an action:".format(
+                        param_name,
+                        source_param.StorageType,
+                        target_param.StorageType
+                    )
+                    user_choice = forms.CommandSwitchWindow.show(
+                        ['Convert and Transfer', 'Cancel Transfer'],
+                        message=message,
+                        title="Type Mismatch Detected"
+                    )
+
+                    if user_choice == 'Convert and Transfer':
+                        # Attempt conversion
+                        converted_value, success = convert_parameter_value(source_param, target_param, source_value)
+                        if success:
+                            source_value = converted_value
+                        else:
+                            # Notify user of failure and skip transfer
+                            output.print_md("Failed to convert value '{0}' for parameter '{1}'. Skipping transfer.".format(source_value, param_name))
+                            continue
+                    else:
+                        # User chose to cancel transfer for this parameter
+                        output.print_md("Transfer of parameter '{0}' cancelled by user.".format(param_name))
+                        continue
+
+                # Aggregate the values and counts
+                value_key = str(source_value)
+                if value_key in param_values_counts[param_name]:
+                    param_values_counts[param_name][value_key] += 1
+                else:
+                    param_values_counts[param_name][value_key] = 1
 
         # Prepare the final data to set in the primary element's parameter
         combined_data_parts = []
         for param_name in selected_intersecting_params:
             values_counts = param_values_counts[param_name]
+            if not values_counts:
+                continue  # Skip if no values to set
             # Format the values with counts
             formatted_values = []
             for value, count in values_counts.items():
                 if count > 1:
-                    formatted_value = "{} ({})".format(value, count)
+                    formatted_value = "{0} ({1})".format(value, count)
                 else:
                     formatted_value = value
                 formatted_values.append(formatted_value)
@@ -355,9 +597,9 @@ with revit.Transaction("Update Primary Elements with Intersecting Element Data")
             try:
                 primary_param.Set(final_value)
             except Exception as e:
-                output.print_md("Error setting parameter '{}' on element {}: {}".format(selected_primary_param, primary_element.Id.IntegerValue, str(e)))
+                output.print_md("Error setting parameter '{0}' on element {1}: {2}".format(selected_primary_param, primary_element.Id.IntegerValue, str(e)))
         else:
-            output.print_md("Parameter '{}' not found or read-only on primary element.".format(selected_primary_param))
+            output.print_md("Parameter '{0}' not found or read-only on primary element.".format(selected_primary_param))
 
 # Step 13: Output success message
-output.print_md("Successfully updated primary elements with selected data of intersecting elements.")
+output.print_md("Successfully updated primary elements with selected data from intersecting elements.")
