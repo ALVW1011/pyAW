@@ -1,0 +1,6 @@
+title: Copy Linked Items
+tooltip: Copy and paste in place family instances of a linked model
+author: Antonio Wong
+description: >
+ This tool allows user to select multiple family instances from linked model and paste in place in the current host model.
+required_revit_version: 2020
