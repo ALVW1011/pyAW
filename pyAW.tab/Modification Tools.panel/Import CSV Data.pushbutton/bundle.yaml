@@ -1,6 +1,0 @@
-title: Data Import
-tooltip: Add Element ID to an integer parameter
-author: Antonio Wong
-description: >
- Element ID is not by default a scheduled parameter. This tool allows user to select instances by Category / Family / Family Type and returns all integer based parameters that user can choose to input Element ID.
-required_revit_version: 2020

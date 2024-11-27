@@ -1,0 +1,6 @@
+title: Clash Data
+tooltip: Import processed clash report data
+author: Antonio Wong
+description: >
+ Allows data between clashing elements as detected by Navisworks to be parsed into respective parameters.
+required_revit_version: 2020

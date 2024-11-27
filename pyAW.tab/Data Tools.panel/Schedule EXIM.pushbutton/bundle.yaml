@@ -1,0 +1,6 @@
+title: Schedule EXIM
+tooltip: Export and import schedule data
+author: Antonio Wong
+description: >
+ Export and import schedule in csv format to and from spreadsheet software.
+required_revit_version: 2020
