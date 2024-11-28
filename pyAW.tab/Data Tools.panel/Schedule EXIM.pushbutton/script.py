@@ -29,7 +29,7 @@ def get_shared_parameter_names():
     return sorted(shared_param_names)
 
 def export_schedule_to_csv():
-    """Export a selected schedule to a CSV file, using schedule headers and omitting extra columns."""
+    """Export a selected schedule to a CSV file, ensuring headers are not duplicated."""
     # Collect all non-template schedules in the project
     schedules = [view for view in DB.FilteredElementCollector(doc)
                  .OfClass(DB.ViewSchedule) if not view.IsTemplate]
@@ -92,12 +92,22 @@ def export_schedule_to_csv():
 
     # Open CSV file for writing
     with open(csv_file_path, 'wb') as file:
-        writer = csv.writer(file)
+        writer = csv.writer(file, lineterminator='\n')
         # Write headers in a single row
         writer.writerow([h.encode('utf-8') for h in headers])
 
+        # Determine the start and end rows
+        start_row = body_section.FirstRowNumber
+        end_row = body_section.LastRowNumber
+
+        # Check if the first row contains headers and skip it if necessary
+        first_row_values = [schedule.GetCellText(DB.SectionType.Body, start_row, col).strip() for col in range(len(fields))]
+        header_values = [h.strip() for h in headers]
+        if first_row_values == header_values:
+            start_row += 1  # Skip the first row as it contains headers
+
         # Iterate over each row, skipping group headers
-        for row in range(body_section.FirstRowNumber, body_section.LastRowNumber + 1):
+        for row in range(start_row, end_row + 1):
             try:
                 row_data = []
 
@@ -107,12 +117,12 @@ def export_schedule_to_csv():
                     continue  # Skip group headers or empty rows
 
                 # Retrieve field values
-                for col_index, field in enumerate(fields):
+                for col_index in range(len(fields)):
                     cell_text = schedule.GetCellText(DB.SectionType.Body, row, col_index).strip()
-                    row_data.append(cell_text)
+                    row_data.append(cell_text.encode('utf-8'))
 
                 # Write the row to CSV
-                writer.writerow([str(d).encode('utf-8') for d in row_data])
+                writer.writerow(row_data)
 
             except Exception as e:
                 # Handle errors gracefully
@@ -132,7 +142,7 @@ def export_schedule_to_csv():
     )
 
 def import_csv_to_revit():
-    """Import data from a CSV file to update Revit elements, handling units conversion for parameters."""
+    """Import data from a CSV file to update Revit elements, skipping unchanged values."""
     # Prompt user to select CSV file
     csv_file_path = forms.pick_file(file_ext='csv')
     if not csv_file_path:
@@ -158,7 +168,7 @@ def import_csv_to_revit():
         forms.alert("No unique identifier parameter selected. Aborting import.")
         return
 
-    # Get the parameter definition and storage type
+    # Get the parameter definition
     param_definition = None
     binding_map = doc.ParameterBindings
     iterator = binding_map.ForwardIterator()
@@ -174,7 +184,7 @@ def import_csv_to_revit():
         return
 
     # Read CSV data
-    with open(csv_file_path, 'rb') as file:
+    with open(csv_file_path, 'r') as file:
         reader = csv.DictReader(file)
         t = DB.Transaction(doc, "Import CSV Data")
         t.Start()
@@ -184,7 +194,7 @@ def import_csv_to_revit():
             # Prompt user about updating type parameters
             update_type_params = forms.CommandSwitchWindow.show(
                 ["Yes", "No"],
-                message="Type parameters affect all instances of a type.\nDo you want to update type parameters during import?"
+                message="Do you want to update Type Parameters during import?"
             ) == "Yes"
 
             for row in reader:
@@ -256,35 +266,58 @@ def import_csv_to_revit():
                         if is_type_param and not update_type_params:
                             continue  # Skip updating this parameter
 
-                        # Set the parameter value based on its storage type
+                        # Get current parameter value
+                        current_value = None
                         if param.StorageType == DB.StorageType.String:
-                            param.Set(value.decode('utf-8') if isinstance(value, bytes) else value)
+                            current_value = param.AsString() or ""
+                        elif param.StorageType == DB.StorageType.Double:
+                            # Get parameter's definition
+                            param_def = param.Definition
+                            # Get parameter's UnitType
+                            param_unit_type = param_def.UnitType
+                            # Get the format options for this UnitType from project units
+                            format_options = doc.GetUnits().GetFormatOptions(param_unit_type)
+                            display_unit = format_options.DisplayUnits
+                            # Convert internal value to display units for comparison
+                            internal_value = param.AsDouble()
+                            current_value = DB.UnitUtils.ConvertFromInternalUnits(internal_value, display_unit)
+                        elif param.StorageType == DB.StorageType.Integer:
+                            current_value = param.AsInteger()
+                        elif param.StorageType == DB.StorageType.ElementId:
+                            current_value = param.AsElementId().IntegerValue
+
+                        # Compare the current value with the new value
+                        new_value = value.strip()
+                        if param.StorageType == DB.StorageType.String:
+                            if current_value == new_value:
+                                continue  # Skip if value hasn't changed
+                            param.Set(new_value)
                         elif param.StorageType == DB.StorageType.Double:
                             try:
-                                # Handle units conversion
-                                # Get parameter's definition
-                                param_def = param.Definition
-                                # Get parameter's UnitType
-                                param_unit_type = param_def.UnitType
-                                # Get the format options for this UnitType from project units
-                                format_options = doc.GetUnits().GetFormatOptions(param_unit_type)
-                                display_unit = format_options.DisplayUnits
                                 # Parse the value from the CSV (assumed to be in display units)
-                                display_value = float(value)
+                                display_value = float(new_value)
                                 # Convert to internal units (feet)
                                 internal_value = DB.UnitUtils.ConvertToInternalUnits(display_value, display_unit)
+                                if abs(param.AsDouble() - internal_value) < 1e-6:
+                                    continue  # Skip if value hasn't changed
                                 param.Set(internal_value)
                             except Exception as e:
                                 # Handle exceptions if needed
                                 pass
                         elif param.StorageType == DB.StorageType.Integer:
                             try:
-                                param.Set(int(value))
+                                new_int_value = int(new_value)
+                                if current_value == new_int_value:
+                                    continue  # Skip if value hasn't changed
+                                param.Set(new_int_value)
                             except:
                                 pass  # Invalid integer, skip
                         elif param.StorageType == DB.StorageType.ElementId:
                             try:
-                                param.Set(DB.ElementId(int(value)))
+                                new_elem_id = DB.ElementId(int(new_value))
+                                if current_value == new_elem_id.IntegerValue:
+                                    continue  # Skip if value hasn't changed
+                                param.Set(new_elem_id)
                             except:
                                 pass  # Invalid ElementId, skip
 
