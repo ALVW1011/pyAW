@@ -1,0 +1,6 @@
+title: Cut
+tooltip: Select categories and references to automatically cut.
+author: Antonio Wong
+description: >
+  After selecting the category, family, and type, you can choose which instances to cut.
+required_revit_version: 2020

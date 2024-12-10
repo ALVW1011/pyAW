@@ -1,0 +1,6 @@
+title: Uncut
+tooltip: Select categories and references to automatically uncut.
+author: Antonio Wong
+description: >
+  After selecting the category, family, and type, you can choose which instances to uncut.
+required_revit_version: 2020
