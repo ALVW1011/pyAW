@@ -1,11 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-PyRevit Script: Copy Instances from Linked Model to Host Model
+PyRevit Script: Import CSV Data and Update Primary Elements with Intersecting Element Data
 
 Description:
-This script allows users to select a linked Revit model, choose a filter
-(category or family type), select specific elements based on the filter,
-and copy those elements into the host model, maintaining their original positions.
+This script allows users to:
+1. Select a CSV file containing element IDs for primary and intersecting elements.
+2. Associate these IDs with chosen documents (host or linked).
+3. Filter and select parameters to transfer data from intersecting elements to a specified parameter in the primary elements.
+4. Handle null/"N/A" values, dimension parameters, and unit conversions (assumes dimension values from CSV are in millimeters and converts them to Revit internal units [feet]).
+
+Features:
+- Does not overwrite primary parameters if no meaningful data is found.
+- Converts dimension parameter values from millimeters (CSV) to feet (Revit internal units).
+- Gracefully handles string, integer, and dimension parameters.
+- Skips non-numeric or aggregated data for dimension parameters to preserve existing values.
 
 Author: Your Name
 Date: YYYY-MM-DD
@@ -16,7 +24,7 @@ import os
 import csv
 from collections import Counter
 
-# Initialize the output log for showing results
+# Initialize the output log
 output = script.get_output()
 uidoc = __revit__.ActiveUIDocument
 doc = uidoc.Document
@@ -40,6 +48,7 @@ def get_relevant_parameters(element, include_read_only=False):
         if param.StorageType != DB.StorageType.None and (include_read_only or not param.IsReadOnly):
             formatted_name = format_parameter_info(param, is_type_param=False)
             params.append((formatted_name, param.Definition.Name))
+
     # Type parameters
     type_id = element.GetTypeId()
     if type_id != DB.ElementId.InvalidElementId:
@@ -127,7 +136,6 @@ STRUCTURAL_MATERIAL_PARAM = DB.BuiltInParameter.STRUCTURAL_MATERIAL_PARAM
 TYPE_MARK_PARAM = DB.BuiltInParameter.ALL_MODEL_TYPE_MARK
 
 file_path = forms.pick_file(file_ext='csv', title="Select a CSV Clash Report File")
-
 if not file_path:
     forms.alert("No file selected. Exiting script.", exitscript=True)
 
@@ -213,7 +221,6 @@ for element_id_str in primary_element_ids:
         output.print_md("Error processing Element ID **{0}**: {1}".format(element_id_str, str(e)))
 
 output.print_md("**Total primary elements found:** {0}".format(len(primary_elements)))
-
 if not primary_elements:
     forms.alert("No valid primary elements found in the selected primary document. Exiting script.", exitscript=True)
 
@@ -312,7 +319,6 @@ for primary_element in primary_elements:
 
         for param_name in selected_intersecting_params:
             source_value = None
-
             if param_name == "Structural Material":
                 type_id = intersecting_element.GetTypeId()
                 if type_id != DB.ElementId.InvalidElementId:
@@ -331,7 +337,6 @@ for primary_element in primary_elements:
                             source_value = get_parameter_value(source_param, intersecting_doc)
             else:
                 source_param = intersecting_element.LookupParameter(param_name)
-
                 if source_param is None or not source_param.HasValue:
                     type_id = intersecting_element.GetTypeId()
                     if type_id != DB.ElementId.InvalidElementId:
@@ -433,8 +438,7 @@ with revit.Transaction("Update Primary Elements with Intersecting Element Data")
                     output.print_md("Parameter **'{0}'** not found on primary element ID **{1}**.".format(selected_primary_param, primary_element.Id.IntegerValue))
                     continue
 
-                # If not compatible, handle conversions or cancellations
-                if hasattr(source_param, 'StorageType') and hasattr(target_param, 'StorageType'):
+                if source_value is not None and source_value_str != "N/A" and source_param and hasattr(source_param, 'StorageType') and hasattr(target_param, 'StorageType'):
                     if not are_parameter_types_compatible(source_param, target_param):
                         if apply_to_all and user_decision:
                             user_choice = user_decision
@@ -493,6 +497,7 @@ with revit.Transaction("Update Primary Elements with Intersecting Element Data")
                 else:
                     value_part = item
                     count_part = ""
+
                 values = value_part.split(delimiter)
                 if len(values) != len(selected_intersecting_params):
                     continue
@@ -503,11 +508,9 @@ with revit.Transaction("Update Primary Elements with Intersecting Element Data")
         else:
             final_value = ", ".join(formatted_values)
 
-        # -------------------------
-        # NEW LOGIC ADDED HERE
-        # Check if final_value contains any real data besides "N/A"
+        # Check if final_value has any real data
         if not final_value.strip():
-            # final_value is empty, skip setting parameter
+            # No data, skip
             continue
 
         real_data_found = False
@@ -517,16 +520,68 @@ with revit.Transaction("Update Primary Elements with Intersecting Element Data")
                 break
 
         if not real_data_found:
-            # All values are "N/A" or no real data selected, skip setting this parameter
+            # All data N/A, skip
             continue
-        # -------------------------
 
         primary_param = primary_element.LookupParameter(selected_primary_param)
         if primary_param and not primary_param.IsReadOnly:
-            try:
-                primary_param.Set(final_value)
-            except Exception as e:
-                output.print_md("**Error setting parameter '{0}' on element {1}: {2}**".format(selected_primary_param, primary_element.Id.IntegerValue, str(e)))
+            target_storage_type = primary_param.StorageType
+
+            # Conversion function from mm to feet
+            def mm_to_feet(mm_val):
+                return float(mm_val) / 304.8
+
+            if target_storage_type == DB.StorageType.Double:
+                # Dimension parameter: ensure single numeric value
+                values_split = final_value.split(",")
+                if len(values_split) > 1:
+                    # Aggregated multiple values, skip
+                    continue
+
+                single_val = values_split[0].strip()
+                try:
+                    float_val = float(single_val)
+                except ValueError:
+                    # Not numeric, skip
+                    continue
+
+                # Convert from millimeters (CSV) to feet (Revit internal units)
+                float_val = mm_to_feet(float_val)
+
+                try:
+                    primary_param.Set(float_val)
+                except Exception as e:
+                    output.print_md("**Error setting dimension parameter '{0}' on element {1}: {2}**".format(
+                        selected_primary_param, primary_element.Id.IntegerValue, str(e)))
+
+            elif target_storage_type == DB.StorageType.String:
+                # If final_value is "N/A", skip
+                if final_value.strip().upper() == "N/A":
+                    continue
+                try:
+                    primary_param.Set(final_value)
+                except Exception as e:
+                    output.print_md("**Error setting string parameter '{0}' on element {1}: {2}**".format(
+                        selected_primary_param, primary_element.Id.IntegerValue, str(e)))
+
+            elif target_storage_type == DB.StorageType.Integer:
+                # Integer parameter: try converting to int
+                values_split = final_value.split(",")
+                if len(values_split) > 1:
+                    continue
+                single_val = values_split[0].strip()
+                try:
+                    int_val = int(single_val)
+                except ValueError:
+                    continue
+                try:
+                    primary_param.Set(int_val)
+                except Exception as e:
+                    output.print_md("**Error setting integer parameter '{0}' on element {1}: {2}**".format(
+                        selected_primary_param, primary_element.Id.IntegerValue, str(e)))
+            else:
+                # Other storage types: skip for safety
+                continue
         else:
             output.print_md("**Parameter '{0}' not found or is read-only on primary element.**".format(selected_primary_param))
 
