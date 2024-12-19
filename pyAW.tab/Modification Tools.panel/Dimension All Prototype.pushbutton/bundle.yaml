@@ -1,0 +1,6 @@
+title: Dimension All
+tooltip: Select categories and references to automatically dimension.
+author: Antonio Wong
+description: >
+  After selecting the category, family, and type, you can choose which instances to dimension.
+required_revit_version: 2020
